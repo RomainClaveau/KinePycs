@@ -415,7 +415,7 @@ class Tree:
 
             if appending_type == "var":
                 if appending_row == -1:
-                    appending_row = self.iVars[-1]
+                    appending_row = int(self.sVars[-1][1:])
 
                 if f"x{appending_row}" not in self.sVars: raise RowError("Specified row does not match any element.")
 
@@ -459,13 +459,13 @@ class Tree:
             # Creating the block corresponding to `_op` which refers to its children
             blocks[f"${_op}$"] = f"${_op}$({','.join([f'${str(_val)}$' for _val in self.Children[_op]])})"
 
-            # Now, we are searching for occurrence of `_op` in other blocks and replace it by its stringified version
-            for _id, _block in dict(blocks).items():
-                if _block.find(f"${_op}$") != -1 and _block.find(f"${_op}$(") == -1:
-                    blocks[_id] = blocks[_id].replace(f"${_op}$", blocks[f"${_op}$"])
+        # Browsing again all the operation nodes and inject them in their parent expression
+        for _op in self.iOperators:
+            for _p in self.Parents[_op]:
+                blocks[f"${_p}$"] = blocks[f"${_p}$"].replace(f"${_op}$", blocks[f"${_op}$"])
 
-                    # Deleting the block to avoid unnecessary calculations in the case we have to perform another loop
-                    del blocks[f"${_op}$"]
+                # Deleting the block to avoid further calculations
+                del blocks[f"${_op}$"]
 
         # If all replacements were performed, `blocks` should be of length 1
         if len(blocks) == 1:
@@ -487,6 +487,7 @@ class Tree:
 
         # TODO: if `blocks` contains more than one block
         # We may assume that replacement/injection is not complete
+        return blocks
 
     """
     Lambdify the stringified expression of the tree - Returning a ready-to-use function as a lambda function
