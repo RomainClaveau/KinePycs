@@ -79,6 +79,10 @@ Available operations
     .div --> x / y (unprotected against y = 0 singularity)
 """
 _Operations = {
+    # Identity operation to avoid stringify and lambdify 
+    # to fail whenever these are applied on no-operation trees like `f(x) = x`
+    "id": {"arity": 1, "func": lambda x: x},
+
     "exp": {"arity": 1, "func": lambda x: exp(x)},
     "log": {"arity": 1, "func": lambda x: log(x)},
     "neg": {"arity": 1, "func": lambda x: -x},
@@ -86,7 +90,7 @@ _Operations = {
     "abs": {"arity": 1, "func": lambda x: abs(x)},
     "sqrt": {"arity": 1, "func": lambda x: sqrt(x)},
 
-    "pow": {"arity": 2, "func": lambda x, y: x ** y},
+    "pow": {"arity": 2, "func": lambda x, y: power(x, y)},
     "plus": {"arity": 2, "func": lambda x, y: x + y},
     "minus": {"arity": 2, "func": lambda x, y: x - y},
     "mult": {"arity": 2, "func": lambda x, y: x * y},
@@ -111,6 +115,7 @@ Types
     .AppendError    raised when the specified type is not appendable (i.e. others types than `var` and `cst`)
     .RowError       raised when the specified row is out-of-range
     .StringifyError raised when the string representation of the Tree is incomplete (not all nodes are represented)
+    .LoopError      raised when the parsing loop is stuck or does not converge to a complete tree string representation
     .LambdifyError  raised when the parsed string representation of the Tree could not be evaluated as a function
 """
 class DuplicateError(Exception): pass
@@ -126,6 +131,7 @@ class OperatorError(Exception): pass
 class AppendError(Exception): pass
 class RowError(Exception): pass
 class StringifyError(Exception): pass
+class LoopError(Exception): pass
 class LambdifyError(Exception): pass
 
 class Tree:
@@ -366,7 +372,7 @@ class Tree:
         .(Exception) AppendError:   The specified type is not appendable
         .(Exception) RowError:      The specified row is out-of-range
     """
-    def apply_on_node(self, node: int, operation: str, appending_type: str, appending_row: int = -1) -> None or Exception:
+    def apply_on_node(self, node: int, operation: str, appending_type: str = "var", appending_row: int = -1) -> None or Exception:
 
         # Checking arguments' type
         if not isinstance(node, (int)): raise TypeError("`node` should be an integer")
@@ -440,6 +446,8 @@ class Tree:
 
         .(str) tree_str:                Stringified tree (almost) ready for interpretation
         .(Exception) StringifyError:    Not all nodes are accounted for in the stringified expression
+        .(Exception) LoopError:         Whether an infinite loop is detected or if it does not lead to
+                                        a complete expression for the tree string representation
     """
     def stringify(self, update=False) -> str or Exception:
 
@@ -453,25 +461,36 @@ class Tree:
         # Operator blocks (parent) encapsulating nodes (children)
         blocks = {}
 
+        tree_str = None
+
         # Operation nodes always have child (or children)
         for _op in self.iOperators:
-
             # Creating the block corresponding to `_op` which refers to its children
             blocks[f"${_op}$"] = f"${_op}$({','.join([f'${str(_val)}$' for _val in self.Children[_op]])})"
 
-        # Browsing again all the operation nodes and inject them in their parent expression
-        for _op in self.iOperators:
-            for _p in self.Parents[_op]:
-                blocks[f"${_p}$"] = blocks[f"${_p}$"].replace(f"${_op}$", blocks[f"${_op}$"])
-
-                # Deleting the block to avoid further calculations
+            # Retrieving the highest operator
+            if len(self.Parents[_op]) == 0:
+                tree_str = blocks[f"${_op}$"]
                 del blocks[f"${_op}$"]
 
+        # Initializing a loop counter to avoid infinite `while` looping
+        _c = 0
+
+        while len(blocks) > 0:
+            for _id in dict(blocks):
+
+                # Detecting operations which are not injected yet
+                if tree_str.find(_id) != -1 and tree_str.find(_id + "(") == -1:
+                    tree_str = tree_str.replace(_id, blocks[_id])
+                    del blocks[_id]
+
+            _c += 1
+
+            # Emergency exit from infinite looping
+            if _c > len(self.iOperators): raise LoopError("Exiting because of an infinite loop detected.")
+
         # If all replacements were performed, `blocks` should be of length 1
-        if len(blocks) == 1:
-            
-            # Stringified tree with nodes represented by their id
-            tree_str = next(iter(blocks.values()))
+        if len(blocks) == 0:
 
             # Checking that all nodes are represented in the final expression
             if sorted([int(_x) for _x in findall(r'\$(\d+)\$', tree_str)]) != sorted(self.Nodes.keys()):
@@ -485,9 +504,8 @@ class Tree:
 
             return tree_str
 
-        # TODO: if `blocks` contains more than one block
         # We may assume that replacement/injection is not complete
-        return blocks
+        raise LoopError("Failed to stringify the tree.")
 
     """
     Lambdify the stringified expression of the tree - Returning a ready-to-use function as a lambda function
@@ -522,7 +540,7 @@ class Tree:
         if self.Lambdified is not None and update is False:
             return self.Lambdified
 
-        if self.Stringified is None:
+        if self.Stringified is None or update is True:
             self.stringify(update=True)
 
         tree_expr = self.Stringified
