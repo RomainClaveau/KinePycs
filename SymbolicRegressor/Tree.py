@@ -5,7 +5,7 @@
 
 """
 Author:             Romain Claveau
-Version:            0
+Version:            0 (unstable)
 Python version:     3.11.7
 Dependencies:       numpy, re
 License:            CC BY-NC-SA (https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -24,12 +24,16 @@ that could be modified through operations on nodes.
 Operations
 ==========
 
-    .add_node       -   Adding a node into the tree
-    .add_edge       -   Adding an edge between two nodes
-    .delete_edge    -   Removing an edge
-    .apply_on_node  -   Apply an mathematical operation on a node
-    .stringify      -   Return a string representing the mathematical Tree
-    .lambdify       -   Return a callable function representing the mathematical Tree
+    .add_node           -   Adding a node into the tree
+    .add_edge           -   Adding an edge between two nodes
+    .delete_edge        -   Removing an edge
+    .apply_on_node      -   Apply an mathematical operation on a node
+    .get_branches       -   Return all the branches
+    .get_branching_from -   Return all nodes and edges below (or above) a specified node
+    .delete_node        -   Deleting a node
+    .mutate_node        -   Mutating a node
+    .stringify          -   Return a string representing the mathematical Tree
+    .lambdify           -   Return a callable function representing the mathematical Tree
 
 Example
 =======
@@ -78,15 +82,19 @@ Available operations
     .mult --> x * y
     .div --> x / y (unprotected against y = 0 singularity)
 """
+
+# Prevents overflow for logarithmic and inverse-like operations
+ε = 1e-5
+
 _Operations = {
     # Identity operation to avoid stringify and lambdify 
     # to fail whenever these are applied on no-operation trees like `f(x) = x`
     "id": {"arity": 1, "func": lambda x: x},
 
     "exp": {"arity": 1, "func": lambda x: exp(x)},
-    "log": {"arity": 1, "func": lambda x: log(x)},
+    "log": {"arity": 1, "func": lambda x: log(ε + x)},
     "neg": {"arity": 1, "func": lambda x: -x},
-    "inv": {"arity": 1, "func": lambda x: 1 / x},
+    "inv": {"arity": 1, "func": lambda x: 1 / (ε + x)},
     "abs": {"arity": 1, "func": lambda x: abs(x)},
     "sqrt": {"arity": 1, "func": lambda x: sqrt(x)},
 
@@ -94,7 +102,7 @@ _Operations = {
     "plus": {"arity": 2, "func": lambda x, y: x + y},
     "minus": {"arity": 2, "func": lambda x, y: x - y},
     "mult": {"arity": 2, "func": lambda x, y: x * y},
-    "div": {"arity": 2, "func": lambda x, y: x / y},
+    "div": {"arity": 2, "func": lambda x, y: x / (ε + y)},
 }
 
 """
@@ -114,6 +122,7 @@ Types
     .OperatorError  raised when the specified operation does not exist
     .AppendError    raised when the specified type is not appendable (i.e. others types than `var` and `cst`)
     .RowError       raised when the specified row is out-of-range
+    .ParentError    raised when the specified node does not have a parent
     .StringifyError raised when the string representation of the Tree is incomplete (not all nodes are represented)
     .LoopError      raised when the parsing loop is stuck or does not converge to a complete tree string representation
     .LambdifyError  raised when the parsed string representation of the Tree could not be evaluated as a function
@@ -130,6 +139,7 @@ class EdgeError(Exception): pass
 class OperatorError(Exception): pass
 class AppendError(Exception): pass
 class RowError(Exception): pass
+class ParentError(Exception): pass
 class StringifyError(Exception): pass
 class LoopError(Exception): pass
 class LambdifyError(Exception): pass
@@ -155,28 +165,29 @@ class Tree:
         >> T = Tree(dimension=2)
             --> Studying y = f(x0, x1)
     """
-    def __init__(self, dimension) -> None or Exception:
+    def __init__(self, dimension: int) -> None or Exception:
 
         # Creating all the Tree's properties
         self.Dimension = None    # Dimension of the system
 
-        self.Nodes = {}          # Nodes values
-        self.Edges = []          # Edges list
+        self.Nodes = {}         # Nodes values
+        self.Edges = []         # Edges list
+        self.Branches = None    # Branches list
 
-        self.Expr = None         # String representation of the formula
-        self.Lambda = None       # Lambda function of the formula
+        self.Expr = None        # String representation of the formula
+        self.Lambda = None      # Lambda function of the formula
 
-        self.sVars = []          # Variables symbols
-        self.sConstants = []     # Constants symbols
+        self.sVars = []         # Variables symbols
+        self.sConstants = []    # Constants symbols
 
-        self.Parents = {}        # Parent of each node (if any)
-        self.Children = {}       # Children(s) of each node (if any)
+        self.Parents = {}       # Parent of each node (if any)
+        self.Children = {}      # Children(s) of each node (if any)
 
-        self.iVars = []          # Variables list
-        self.iConstants = []     # Constants list
-        self.iOperators = []     # Operators list
+        self.iVars = []         # Variables list
+        self.iConstants = []    # Constants list
+        self.iOperators = []    # Operators list
 
-        self.Stringified = None  # Stringified expression of the tree (string)
+        self.Stringified = None # Stringified expression of the tree (string)
         self.Lambdified = None
 
         # Checking if dimension >= 0
@@ -372,7 +383,7 @@ class Tree:
         .(Exception) AppendError:   The specified type is not appendable
         .(Exception) RowError:      The specified row is out-of-range
     """
-    def apply_on_node(self, node: int, operation: str, appending_type: str = "var", appending_row: int = -1) -> None or Exception:
+    def apply_on_node(self, node: int, operation: str, appending_type: str = "var", appending_row: int = -1) -> int or Exception:
 
         # Checking arguments' type
         if not isinstance(node, (int)): raise TypeError("`node` should be an integer")
@@ -434,6 +445,304 @@ class Tree:
         return _id
 
     """
+    Compute the branches - Returning each branch composition, starting from the lowest node and ending to the highest
+
+    Arguments
+    =========
+
+        .(bool) update: Forcing (True) or not (False) the update of the branches
+
+    Returns
+    =======
+
+        .(list) branches:           List of branches with each node composing them
+        .(Exception) ValueError:    When working with an empty tree 
+    """
+    def get_branches(self, update: bool = False) -> list:
+
+        if self.Branches is not None and update is False:
+            return self.Branches
+
+        # Empty tree
+        if bool(self.Nodes) is False:
+            raise ValueError("Trying to recover branches from an empty tree.")
+
+        # Retrieving the highest node's id
+        highest_node = [_child for _child, _parents in self.Parents.items() if len(_parents) == 0][-1]
+
+        # Retrieving the lowest nodes' id as the ending leaf for each branch
+        paths = [[_parent] for _parent, _children in self.Children.items() if len(_children) == 0]
+
+        # Now, populating the branches with the remaining nodes
+        for _p, _ in enumerate(paths[:]):
+            while paths[_p][-1] != highest_node:
+                _child = paths[_p][-1]
+
+                # Retrieving the parent
+                if _child in self.Parents:
+                    paths[_p].append(self.Parents[_child][0])
+
+        self.Branches = paths
+
+        return self.Branches
+
+    """
+    Retrieve nodes (and edges) below a specific node
+
+    Arguments
+    =========
+
+        .(int) node:        Node below which all nodes and edges are collected
+        .(bool) include:    Whether the parent node is included in the list
+
+    Returns
+    =======
+
+        .(list) nodes + edges:  A tuple containing both nodes and edges
+                                i.e. list = ([id0, id1, ...], [edge0, edge1, ...])
+        .(Exception) TypeError: The specified type is not correct
+        .(Exception) NodeError: The specified node does not exist
+    """
+    def get_branching_from(self, node: int, include: bool = False) -> list:
+
+        # Checking arguments' type
+        if not isinstance(node, (int)): raise TypeError("`node` should be an integer.")
+        if not isinstance(include, (bool)): raise TypeError("`include` should be a boolean.")
+
+        # Checking if the specified node exists
+        if node not in self.Nodes: raise NodeError("The specified node does not exist.")
+
+        _nodes = []
+        _edges = []
+
+        # Browsing through all branches
+        for _branch in self.Branches[:]:
+
+            # Retrieving the index
+            if node not in _branch: continue
+
+            _bid = _branch.index(node)
+
+            if include is True:
+                _bid += 1
+
+            _nodes += _branch[:_bid]
+            _edges += [[_branch[n],_branch[n+1]] for n,_ in enumerate(_branch[:min(_bid, len(_branch) - 1)])]
+
+        # Removing duplicates
+        _nodes = list(set(_nodes))
+        _edges = [[_k, _v] for _k, _v in dict(_edges).items()]
+
+        return _nodes, _edges
+
+    """
+    Deleting a branching starting from or ending by a specific node
+
+    Arguments
+    =========
+
+        .(int) node:        Node below which all nodes and edges are collected
+        .(bool) include:    Whether the parent node is included in the list
+
+    Returns
+    =======
+
+        .None
+        .(Exception) TypeError: The specified type is not correct
+        .(Exception) NodeError: The specified node does not exist
+    """
+    def delete_branching_from(self, node: int, include: bool = False) -> None:
+
+        # NOTE: Please use this function instead of `delete_node` to delete a node as this function handle
+        # the removal of its children, i.e. nodes and edges.
+
+        # TODO: Prevent the removal of no-child nodes (i.e. ending leafs) as otherwise it leads
+        # to operations being applied on nothing.
+
+        # Forcing the update
+        self.get_branches(update=True)
+
+        # Retrieving impacted nodes and edges
+        nodes, edges = self.get_branching_from(node, include)
+
+        # Deleting edges
+        for _edge in edges:
+            
+            if _edge not in self.Edges:
+                _edge = reversed(_edge)
+
+            self.delete_edge(_edge)
+
+        # Deleting nodes
+        for _node in nodes:
+            self.delete_node(_node)
+
+        return None
+
+    """
+    Deleting a node
+
+    Arguments
+    =========
+
+        .(int) node: The node to be deleted
+
+    Returns
+    =======
+
+        .None
+        .(Exception) TypeError: The specified type is not correct
+        .(Exception) NodeError: The specified node does not exist
+    """
+    def delete_node(self, node: int) -> None:
+        
+        # NOTE: As `delete_node` does not delete a node the "safe" way (it just delete instances
+        # without taking care of deleting edges, etc. it should not used as a standalone operation.
+        # If you wish to delete a node correctly, please use the `delete_branching_from` function.
+        # In instance, `delete_node` should be exclusively called from `delete_branching_from`.
+
+        # Checking argument's type
+        if not isinstance(node, (int)): raise TypeError("`node` should be an integer.")
+
+        # Checking if the specified node exists
+        if node not in self.Nodes: raise NodeError("The specified node does not exist.")
+
+        # Deleting node from `Nodes`
+        del self.Nodes[node]
+
+        # Deleting node from `Parents`
+        del self.Parents[node]
+
+        for _n, _v in dict(self.Parents).items():
+            if node in _v:
+                self.Parents[_n].remove(node)
+
+        # Deleting node from `Children`
+        del self.Children[node]
+
+        for _n, _v in dict(self.Children).items():
+            if node in _v:
+                self.Children[_n].remove(node)
+
+        # Deleting node from nodes, constants and operators list
+        if node in self.iVars: self.iVars.remove(node)
+        if node in self.iConstants: self.iConstants.remove(node)
+        if node in self.iOperators: self.iOperators.remove(node)
+
+        # Deleting unused constants
+        self.sConstants = [_v["value"] for _n, _v in self.Nodes.items() if _v["type"] == "cst"]
+
+        return None
+
+    """
+    Mutate a node - Converting it into another node
+
+    Arguments
+    =========
+
+        .(int) node:            The node to be mutated
+        .(str) type:            The new type to be applied (`op`, `var` or `cst`)
+        .(str) value:           The new value of the node
+        .(str) appending_type:  The type of node to be appended (in the case of a 2-arity operation)
+        .(int) appending_row:   Select the n-th row of the appended type (either `cst` or `var`, 
+                                in the case of a 2-arity operation)
+
+    Returns
+    =======
+
+        .None
+        .(Exception) TypeError:     The specified type is not correct
+        .(Exception) ParentError:   The specified node does not have a parent
+        .(Exception) NodeError:     The specified node does not exist
+    """
+    def mutate_node(self, node: int, type: str, value: str, appending_type: str = "var", appending_row: int = -1) -> None:
+
+        # NOTE: Because the implementation is quite tricky, several bugs may pop depending on the usage.
+
+        # Checking arguments' type
+        if not isinstance(node, (int)): raise TypeError("`node` should be an integer.")
+        if not isinstance(type, (str)): raise TypeError("`type` should be a string.")
+        if not isinstance(value, (str)): raise TypeError("`value` should be a string.")
+        if not isinstance(appending_type, (str)): raise TypeError("`appending_type` should be a string.")
+        if not isinstance(appending_row, (int)): raise TypeError("`appending_row` should be an integer.")
+
+        # Checking if the node exists
+        if node not in self.Nodes: raise NodeError("The specified node does not exist.")
+
+        # In the case we are mutating the node by transforming it into a constant
+        # or a variable, we may delete all the associated backward branching beforehand
+        # and deleting the node itself.
+        if type in ("var", "cst"):
+
+            # Retrieving the node's parent
+            if bool(self.Parents[node]) is False:
+                raise ParentError("Could not mutate the highest node.")
+
+            _parent = self.Parents[node][0]
+
+            # Deleting the branching
+            self.delete_branching_from(node, True)
+
+            # Creating a new node and connecting it to `_parent`
+            _id = self.add_node(type=type, value=value)
+            self.add_edge([_id, _parent])
+
+        # In the case the node is mutated into an operation:
+        #   1) If it was already an operation, we just change its value and check whether another node
+        #   should be added.
+        #   2) Otherwise, if it was a constant or a variable (i.e. a non-child node), we just apply a normal
+        #   operation on the node.
+        if type in ("op"):
+            
+            # In the case we are dealing with `op` -> `op`
+            if node in self.iOperators:
+                if value in _Operations:
+
+                    # NOTE: When dealing with a mutation which decrease the arity of the operation, we have to
+                    # delete one of lower branch. For simplicity, we delete the last branch (this may evolve in
+                    # future versions).
+
+                    # (exp, log, inv, ...) -> (mult, plus, ...)
+                    if _Operations[value]["arity"] > _Operations[self.Nodes[node]["value"]]["arity"]:
+
+                        # Adding a new constant
+                        if appending_type == "cst":
+
+                            if len(self.sConstants) > 0:
+                                _val = f"c{int(self.sConstants[-1][1:]) + 1}"
+                            else:
+                                _val = "c0"
+
+                            # Adding it into sConstants
+                            self.sConstants.append(_val)
+
+                        # Retrieving the variable
+                        if appending_type == "var":
+
+                            _val = f"x{int(self.sVars[appending_row][1:])}"
+
+                        # Creating a new node
+                        _id = self.add_node(type=appending_type, value=_val)
+
+                        # Creating a new edge
+                        self.add_edge([_id, node])
+                    
+                    # (mult, plus, ...) -> (exp, log, inv, ...)
+                    if _Operations[value]["arity"] < _Operations[self.Nodes[node]["value"]]["arity"]:
+                        
+                        # Deleting the last branch
+                        self.delete_branching_from(self.Children[node][-1], include=True)
+
+                    # Updating the operation's value
+                    self.Nodes[node]["value"] = value
+            else:
+
+                # Applying the transformation on the node
+                self.apply_on_node(node=node, operation=value, appending_type=appending_type, appending_row=appending_row)
+
+        return None
+
+    """
     Stringify the tree - Returning a mathematical expression representing the tree
 
     Arguments
@@ -449,7 +758,7 @@ class Tree:
         .(Exception) LoopError:         Whether an infinite loop is detected or if it does not lead to
                                         a complete expression for the tree string representation
     """
-    def stringify(self, update=False) -> str or Exception:
+    def stringify(self, update: bool = False) -> str or Exception:
 
         if self.Stringified is not None and update is False:
             return self.Stringified
@@ -523,7 +832,7 @@ class Tree:
         .(callable) tree_lambda:    the lambda function representing the tree
         .(Exception) LambdifyError: the expression could not be converted into a callable function
     """
-    def lambdify(self, update=False) -> callable or Exception:
+    def lambdify(self, update: bool = False) -> callable or Exception:
 
         # NOTE: the lambdify function does use the `EVAL` instruction which may be insecure when applied
         # to arbitrary and unescaped content. Be sure to exclusively pass expressions stemming from the Tree
