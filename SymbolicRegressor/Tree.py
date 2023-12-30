@@ -32,6 +32,7 @@ Operations
     .get_branching_from -   Return all nodes and edges below (or above) a specified node
     .delete_node        -   Deleting a node
     .mutate_node        -   Mutating a node
+    .branch_to_tree     -   Return a Tree representing a specific branch
     .stringify          -   Return a string representing the mathematical Tree
     .lambdify           -   Return a callable function representing the mathematical Tree
 
@@ -512,6 +513,9 @@ class Tree:
         # Checking if the specified node exists
         if node not in self.Nodes: raise NodeError("The specified node does not exist.")
 
+        # Updating the branching
+        self.get_branches(update=True)
+
         _nodes = []
         _edges = []
 
@@ -743,6 +747,42 @@ class Tree:
         return None
 
     """
+    Creating an independent Tree from a specific branching
+
+    Arguments
+    =========
+
+        .(int) node:        The starting node of the branch to be exported as a Tree
+        .(bool) include:    Whether including the starting node or not
+
+    Returns
+    =======
+
+        .(Tree) tree: A new tree representing the specified branching
+    """
+    def branch_to_tree(self, node: int, include: bool = True) -> object:
+        
+        # Creating a new Tree instance
+        tree = self.__class__(self.Dimension)
+
+        # Retrieving all nodes and edges
+        nodes, edges = self.get_branching_from(node, include)
+
+        # Creating the new mapping of ids
+        _m = dict(zip(nodes, [i for i in range(len(nodes))]))
+
+        # Adding all nodes (remapped)
+        for _n in nodes:
+            tree.add_node(type=self.Nodes[_n]["type"], value=self.Nodes[_n]["value"])
+
+        # Adding all edges (remapped)
+        for _e in edges:
+            if all([_n in nodes for _n in _e]):
+                tree.add_edge([_m[_n] for _n in _e])
+
+        return tree
+
+    """
     Stringify the tree - Returning a mathematical expression representing the tree
 
     Arguments
@@ -800,6 +840,10 @@ class Tree:
 
         # If all replacements were performed, `blocks` should be of length 1
         if len(blocks) == 0:
+            
+            # In the case we are dealing with the initial tree
+            if len(self.Nodes) == 1:
+                tree_str = "$0$"
 
             # Checking that all nodes are represented in the final expression
             if sorted([int(_x) for _x in findall(r'\$(\d+)\$', tree_str)]) != sorted(self.Nodes.keys()):
