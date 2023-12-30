@@ -33,6 +33,7 @@ Operations
     .delete_node        -   Deleting a node
     .mutate_node        -   Mutating a node
     .branch_to_tree     -   Return a Tree representing a specific branch
+    .prepend_tree       -   Appending a Tree onto the current structure
     .stringify          -   Return a string representing the mathematical Tree
     .lambdify           -   Return a callable function representing the mathematical Tree
 
@@ -781,6 +782,63 @@ class Tree:
                 tree.add_edge([_m[_n] for _n in _e])
 
         return tree
+
+    """
+    Prepending a branch
+
+    Arguments
+    =========
+
+        .(int) node:    The node at which the tree must be appended (-1 to choose the top of the Tree)
+        .(object) tree: The tree to be appended
+
+    Returns
+    =======
+
+        .None
+        .(Exception) ParentNode: The specified node does not have any parent.
+    """
+    def prepend_tree(self, node: int, tree: object) -> None:
+
+        # Next id to be used in the current Tree
+        __id__ = int(list(self.Nodes.keys())[-1]) + 1
+        
+        # Creating new mapping
+        _m = dict(zip(list(tree.Nodes.keys()), [__id__ + i for i in range(len(self.Nodes))]))
+
+        # Adding all nodes
+        for _n, _v in tree.Nodes.items():
+            self.add_node(type=_v["type"], value=_v["value"])
+
+        # Adding all edges
+        for _e in tree.Edges:
+            if all([_n in tree.Nodes for _n in _e]):
+                self.add_edge([_m[_n] for _n in _e])
+
+        # Retrieve the appended Tree's and current Tree's highest nodes
+        highest_append = _m[[_n for _n in tree.Parents if len(tree.Parents[_n]) == 0][0]]
+
+        # Pre-appending it (at the node of the Tree through an addition operation)
+        if node == -1:
+            highest_current = [_n for _n in self.Parents if len(self.Parents[_n]) == 0][0]
+
+            # Now, creating a "+" operation between the two highest nodes
+            _id = self.add_node(type="op", value="plus")
+            self.add_edge([[highest_current, _id], [highest_append, _id]])
+        else:
+            # Otherwise, we get rid of the node's lower part and append it there
+            
+            # Retrieve node's parent
+            try:
+                _p = self.Parents[node][0]
+            except Exception:
+                raise ParentError("Specified node does not have any parent.")
+
+            self.add_edge([highest_append, _p])
+
+            self.delete_branching_from(node, include=True)
+
+        return None
 
     """
     Stringify the tree - Returning a mathematical expression representing the tree
