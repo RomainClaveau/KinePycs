@@ -91,7 +91,7 @@ Available operations
 _Operations = {
     # Identity operation to avoid stringify and lambdify 
     # to fail whenever these are applied on no-operation trees like `f(x) = x`
-    "id": {"arity": 1, "func": lambda x: x},
+    #"id": {"arity": 1, "func": lambda x: x},
 
     "exp": {"arity": 1, "func": lambda x: exp(x)},
     "log": {"arity": 1, "func": lambda x: log(ε + x)},
@@ -804,8 +804,33 @@ class Tree:
         __id__ = int(list(self.Nodes.keys())[-1]) + 1
         
         # Creating new mapping
-        _m = dict(zip(list(tree.Nodes.keys()), [__id__ + i for i in range(len(self.Nodes))]))
+        _m = dict(zip(list(tree.Nodes.keys()), [__id__ + i for i in range(len(tree.Nodes))]))
 
+        # If there is any constants, we have to rename them
+
+        # Retrieving the last constant inside the parent tree
+        csts = sorted([int(_cst[1:]) for _cst in self.sConstants])
+
+        # Computing the next constant to be appended
+        if len(csts) == 0:
+            _next_id = 0
+        else:
+            _next_id = csts[-1] + 1
+
+        # Applying the transformation to the new constants
+        for _k, _v in tree.Nodes.items():
+            if _v["type"] == "cst":
+                _current = int(_v["value"][1:])
+                _new = _current + _next_id
+
+                # Modifying the constant
+                tree.Nodes[_k]["value"] = f"c{_new}"
+
+                # Modifying the associated strings
+                tree.sConstants.remove(f"c{_current}")
+                tree.sConstants.append(f"c{_new}")
+
+        
         # Adding all nodes
         for _n, _v in tree.Nodes.items():
             self.add_node(type=_v["type"], value=_v["value"])
