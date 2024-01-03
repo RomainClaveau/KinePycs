@@ -7,7 +7,7 @@
 Author:             Romain Claveau
 Version:            1 (stable)
 Python version:     3.11.7
-Dependencies:       numpy, re
+Dependencies:       numpy, re, copy
 License:            CC BY-NC-SA (https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 Reporting an issue:  https://github.com/RomainClaveau/KinePycs/issues
@@ -36,6 +36,7 @@ Operations
     .prepend_tree       -   Appending a Tree onto the current structure
     .stringify          -   Return a string representing the mathematical Tree
     .lambdify           -   Return a callable function representing the mathematical Tree
+    .simplify           -   Return a simplified representation of the tree
 
 Example
 =======
@@ -66,6 +67,7 @@ Final structure
 
 from numpy import *
 from re import *
+from copy import *
 
 """
 Basics operations to be applied on variables or constants
@@ -462,11 +464,11 @@ class Tree:
     """
     def get_branches(self, update: bool = False) -> list:
 
-        if self.Branches is not None and update is False:
+        if self.Branches is not None and not update:
             return self.Branches
 
         # Empty tree
-        if bool(self.Nodes) is False:
+        if not bool(self.Nodes):
             raise ValueError("Trying to recover branches from an empty tree.")
 
         # Retrieving the highest node's id
@@ -528,7 +530,7 @@ class Tree:
 
             _bid = _branch.index(node)
 
-            if include is True:
+            if include:
                 _bid += 1
 
             _nodes += _branch[:_bid]
@@ -680,7 +682,7 @@ class Tree:
         if type in ("var", "cst"):
 
             # Retrieving the node's parent
-            if bool(self.Parents[node]) is False:
+            if not bool(self.Parents[node]):
                 raise ParentError("Could not mutate the highest node.")
 
             _parent = self.Parents[node][0]
@@ -883,7 +885,7 @@ class Tree:
     """
     def stringify(self, update: bool = False) -> str or Exception:
 
-        if self.Stringified is not None and update is False:
+        if self.Stringified is not None and not update:
             return self.Stringified
 
         # NOTE: the current `stringify` implementation may be not the more efficient
@@ -973,10 +975,10 @@ class Tree:
         # Hopefully, security will be enhanced in forthcoming versions.
 
         
-        if self.Lambdified is not None and update is False:
+        if self.Lambdified is not None and not update:
             return self.Lambdified
 
-        if self.Stringified is None or update is True:
+        if self.Stringified is None or update:
             self.stringify(update=True)
 
         tree_expr = self.Stringified
@@ -1001,6 +1003,87 @@ class Tree:
 
         # Should return a function
         return self.Lambdified
+
+    """
+    Simplifying a tree - Applying specific rules to reduce the tree complexity.
+
+        Three-nodes simplifications (3 -> 1)
+        ---------------------------
+        1) cst +-*/ cst     -->     cst
+
+        2) exp(log(...))    -->     ...
+        3) log(exp(...))    -->     ...
+        4) inv(inv(...))    -->     ...
+        5) neg(neg(...))    -->     ...
+        6) abs(abs(...))    -->     ...
+
+    Arguments
+    =========
+
+        .(int) update: Updating the tree on-the-fly (True) or not (False)
+
+    Returns
+    =======
+
+        .(object) tree: Returning the new Tree instance with simplifications
+    """
+    def simplify(self, update: bool = True) -> object:
+
+        # Making a copy of the tree
+        if not update:
+            tree = deepcopy(self)
+        else:
+            tree = self
+
+        for _a, _v in dict(tree.Children).items():
+            
+            # Rule n°1
+            if len(_v) == 2:
+                if all([tree.Nodes[_b]["type"] == "cst" for _b in _v]):
+                    
+                    # Creating a new branch
+                    branch = Tree(dimension=self.Dimension)
+                    branch.add_node(type="cst", value="c0")
+
+                    # Appending the branch
+                    tree.prepend_tree(node=_a, tree=branch)
+            
+            # Rules n°2, n°3, n°4, n°5, n°6
+            if len(_v) == 1:
+
+                _b = _v[0]
+                
+                _successive_operators = [tree.Nodes[_a]["value"], tree.Nodes[_b]["value"]]
+
+                if _successive_operators in [
+                    ["log", "exp"], ["exp", "log"],
+                    ["inv", "inv"], ["neg", "neg"],
+                    ["abs", "abs"]
+                ]:
+                    
+                    # Retrieving the parent of _a
+
+                    # Assuming we have the following architecture: 
+                    #   Parent <- _a <- _b <- Child
+                    if len(tree.Parents[_a]) == 0: raise ParentError("The node does not have a parent.")
+                    _parent = tree.Parents[_a][0]
+
+                    # Retrieving the child of _b
+                    if len(tree.Children[_b]) == 0: raise ChildError("The node does not have a child.")
+                    _child = tree.Children[_b][0]
+
+                    # Removing _a and _b nodes
+                    tree.delete_node(_a)
+                    tree.delete_node(_b)
+
+                    # Removing connections from _a and _b
+                    tree.Edges.remove([_a, _parent])
+                    tree.Edges.remove([_b, _a])
+
+                    # Creating the link between the child and the parent
+                    tree.add_edge([_child, _parent])
+
+        return tree
 
 """
 Timeit
