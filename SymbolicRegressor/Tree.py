@@ -5,7 +5,7 @@
 
 """
 Author:             Romain Claveau
-Version:            0 (unstable)
+Version:            1 (stable)
 Python version:     3.11.7
 Dependencies:       numpy, re
 License:            CC BY-NC-SA (https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -259,7 +259,7 @@ class Tree:
             case "cst":
                 if _id in self.iConstants: raise DuplicateError(f"Object `{_id}` is duplicated.")
                 self.iConstants.append(_id)
-                if value not in self.sConstants: self.sConstants.append(f"c{value}")
+                if value not in self.sConstants: self.sConstants.append(f"{value}")
             case "op":
                 if value not in _Operations: raise OperatorError(f"Operation `{value}` does not exist.")
                 if _id in self.iOperators: raise DuplicateError(f"Object `{_id}` is duplicated.")
@@ -420,7 +420,7 @@ class Tree:
                     if len(self.sConstants) == 0:
                         _id_append = 0
                     else:
-                        _id_append = len(self.sConstants)
+                        _id_append = int(self.sConstants[-1][1:]) + 1
 
                     appending_row = _id_append
 

@@ -5,7 +5,7 @@
 
 """
 Author:             Romain Claveau
-Version:            0 (unstable)
+Version:            1 (stable)
 Python version:     3.11.7
 Dependencies:       Tree (local), random, copy
 License:            CC BY-NC-SA (https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -26,37 +26,75 @@ and its associated paper (https://arxiv.org/pdf/2305.01582.pdf).
 """
 
 import Tree
+from numpy import *
 from random import *
 from copy import *
-from numpy import *
-from scipy import *
+from scipy.optimize import minimize
 
 class Evolution:
 
-    Niter = 100       # Iterations
-    Npop = 1000     # Total population
-    Ngroup = 10      # Population in each group (for tournaments)
+    # NOTE: ...
+    # TODO: ...
 
-    Complexity = 3  # Initial complexity
+    # Numbers
+    # Must have Npopulation mod Nisland = 0
+    # and Nisland mod Ntournament = 0
+    Npopulation = 1000  # Total population
+    Nisland = 10        # Number of expressions inside an island
+    Ntournament = 2    # Number of expressions during a tournament
+    Niterations = 100    # Number of iterations before leaving the evolution process
 
-    Pcross = 0.01   # Probability of crossover
-    Pfittest = 0.9  # Probability of selecting the fittest individual
+    # Dictionary containing all the expressions
+    # For each expression, we save:
+    #   the tree
+    #   the constants (if any)
+    #   the score
+    #   the number of mutations
+    Population = {}
 
-    Population = [] # Population
-    Best = set()    # Best
+    # Dictionary of islands
+    # Each island is independent of others, but elements may migrate
+    # Prevents hasty over-specialization
+    Islands = {}
 
+    # Set containing the best expressions' id
+    Best_overall = set()
+    Best_islands = {}
+
+    # Dictionary keeping track of the expressions' mutations
     Tracks = {}
 
-    Constants = {}  # Constants
-
+    # Best overall expression
     Best_score = 1e99
-    Best_tree = None
+    Best_id = None
+
+    # Probabilities
+    Proba_cross = 0.01      # Performing a crossover
+    Proba_fit = 0.9         # Selecting the fittest
+    Proba_migration = 0.05   # Performing a migration
+
+    Verbose = True
 
     """
-    Initializing the Evolution
-    """
-    def __init__(self, objective: list, dimension: int = 1):
+    Initializing the Evolution class - Defining the data to match and the system's dimension
 
+    Arguments
+    =========
+
+        .(list) objective:  the function whose expression should be matched
+                            should be shaped as (n, dim + 1)
+                            where n is the number of observables
+                            and dim the number of independent variables
+        .(int) dimension:   the number of independent variables
+                            e.g. for y(x) = x, the dimension is 1.
+
+    Returns
+    =======
+
+        .None
+    """
+    def __init__(self, objective: list, dimension: int) -> None:
+        
         # Checking the arguments' type
         if not isinstance(objective, (list)): raise TypeError("`objective` should be a list.")
         if not isinstance(dimension, (int)): raise TypeError("`dimension` should be an integer.")
@@ -65,399 +103,614 @@ class Evolution:
         if dimension <= 0: raise ValueError("`dimension` should higher than zero.")
         if len(objective) == 0 or len(objective[0]) != dimension + 1: raise ValueError("`objective` does not have the required shape.")
 
-        # Saving
+        # Saving the function to match and the associated dimension
         self.Objective = objective
         self.Dimension = dimension
 
-        # Initializing the population
-        self.initialize()
+        # Generating the initial population
+        self.__generate__()
 
     """
-    Initializing the population at fixed complexity
+    Generate the population and populating the islands
+
+    Arguments
+    =========
+
+        .None
+
+    Returns
+    =======
+
+        .None
     """
-    def initialize(self):
+    def __generate__(self) -> None:
         
-        # Creating the population
-        while len(self.Population) != self.Npop:
+        # Generating the population
+        for _id in range(self.Npopulation):
 
-            # Creating the initial tree
-            T = Tree.Tree(dimension=self.Dimension)
-            T.add_node(type="var", value="x0")
+            # Generating a random tree
+            _complexity, _constants, _tree = self.generate_tree(3)
 
-            for i in range(self.Complexity):
-                # Randomly selecting a node
-                _id = choice(list(T.Nodes.keys()))
+            # Saving the expression
+            self.Population[_id] = {
+                "complexity": _complexity,
+                "constants": _constants,
+                "tree": _tree
+            }
 
-                # Randomly selecting an operation
-                _op = choice(list(Tree._Operations.keys()))
-                if _op == "id": continue
+        # Populating the islands
+        ids = list(self.Population.keys())
+        shuffle(ids)
 
-                # Randomly selecting an appending type
-                _at = choice(["var", "cst"])
+        for _n, _id in enumerate(ids):
 
-                # Randomly selecting an appending row
-                _ar = -1
+            _k = int(_n / self.Nisland)
 
-                # Applying on the node
-                T.apply_on_node(node=_id, operation=_op, appending_type=_at, appending_row=_ar)
+            if _k not in self.Islands:
+                self.Islands[_k] = []
 
-                # Saving if we reached the desired complexity
-                if len(T.Nodes.keys()) == self.Complexity:
-                    T.lambdify(update=True)
-                    self.Population.append(deepcopy(T))
-                    break
-
-        # Initializing the constants
-        # Generating uniformly a float between -10 and 10.
-        for _k, _v in enumerate(self.Population):
-            if len(_v.sConstants) != 0:
-                self.Constants[_k] = {_c: uniform(-10, 10) for _c in _v.sConstants}
+            self.Islands[_k].append(_id)
 
     """
-    Computing the error - Several options are natively supported.
-        1) cumul:   Cumulative error
+    Generate a random tree with a given complexity
+
+    Arguments
+    =========
+
+        .(int) complexity: The given complexity (number of nodes)
+
+    Returns
+    =======
+
+        .(tuple) expr:  The tuple containing three elements
+                        1) The complexity
+                        2) The constants
+                        3) The tree
     """
-    def error(self, expr: int, type: str = "cumul") -> float:
+    def generate_tree(self, complexity: int) -> tuple:
 
-        # NOTE: The objective data should be shaped as
-        #   [[x0, y0, z0, u0, ...], [x1, y1, z1, u1, ...], ...]
-        # Meaning that data.shape = (n, dim) where
-        #   n is the number of observations (points)
-        #   dim the number of variables
-        
-        # The last variable is assumed to be expressed through all the others
-        #   i.e. w = f(x, y, z, u, ...)
+        # Generating the initial node
+        tree = Tree.Tree(dimension=self.Dimension)
+        tree.add_node(type="var", value="x0")
 
-        # Retrieving the expression
-        f = self.Population[expr].lambdify(update=True)
+        # Applying random operations until reaching the desired complexity
+        while len(tree.Nodes) <= complexity:
+            self.random_operation(tree)
 
-        # Retrieving the constants
-        if expr in self.Constants:
-            csts = list(self.Constants[expr].values())
+        # Fixing the constants' values (if any)
+        constants = {_k: uniform(-1, 1) for _k in tree.sConstants}
+
+        # Returning the complexity, constants and tree
+        return complexity, constants, tree
+    
+    """
+    Generating a random operation on a tree
+
+    Arguments
+    =========
+
+        .(object) tree: the tree to be operated on
+
+    Returns
+    =======
+
+        .None
+    """
+    def random_operation(self, tree: object) -> None:
+
+        # Selecting a node
+        _id = choice(list(tree.Nodes.keys()))
+
+        # Selecting an operation
+        _op = choice(list(Tree._Operations.keys()))
+
+        # Selecting an appendable type
+        _at = choice(["var", "cst"])
+
+        # Selecting an appendable row
+        if _at == "var":
+            _ar = choice(range(0, self.Dimension))
         else:
-            csts = []
+            _ar = -1
 
-        exps = []
-        calcs = []
+        # Applying the operation
+        tree.apply_on_node(node=_id, operation=_op, appending_type=_at, appending_row=_ar)
 
-        # Calculating
-        try:
-            for obs in self.Objective:
-                exps.append(obs[-1])
-                calcs.append(f(*[*obs[:-1], *csts]))
-        except Exception as e:
-            return 1e99
+    """
+    Calculating the error
+    """
+    def error(self, expr: int or object) -> float:
 
-        # Computing error
-        match type:
-            case "cumul": return sum([abs(exps[i] - calcs[i]) for i in range(len(exps))])
-            case other: pass
+        if isinstance(expr, (int)):
 
-    def optimize(self, id: int) -> None:
-        tree = self.Population[id]
+            # Loading the expression's function
+            f = self.Population[expr]["tree"].lambdify(update=True)
 
-        # Retrieving the expression
-        f = tree.lambdify(update=True)
+            # Loading the constants
+            constants = self.Population[expr]["constants"].values()
 
-        # Retrieving the constants
-        if id in self.Constants:
-            csts = list(self.Constants[id].values())
         else:
-            return None
+            
+            # Loading the expression's function
+            f = expr.lambdify(update=True)
+            
+            # Loading the constants
+            constants = [uniform(-1, 1) for _cst in expr.sConstants]
 
-        def eq(args):
-            err = 0.0
+        err = 0.0
 
-            for obs in self.Objective:
-                try:
-                    err += abs(obs[-1] - f(*[*obs[:-1], *args]))
-                except Exception:
-                    err = 1e99
-                    break
+        for _obs in self.Objective:
 
+            # NOTE: _obs = [x0, x1, ..., xn]
+            # we consider [x0, x1, ..., xn-1] to be the variables
+            # and xn the observable such that
+            # xn = f(x0, x1, ..., xn-1)
+
+            try:
+                err += abs(f(*[*_obs[:-1], *constants]) - _obs[-1])
+            except Exception:
+                return 1e99
+
+        # Checking whether we get NaN of Inf
+        if isfinite(err):
             return err
-
-        sol = optimize.minimize(eq, x0=list(csts), method="Nelder-Mead", options={"adaptive": True})
-
-        if sol.fun < self.Best_score:
-            self.Best_score = sol.fun
-            self.Best_tree = deepcopy(tree)
-
-        for _n, _k in enumerate(self.Constants[id]):
-            self.Constants[id][_k] = sol.x[_n]
-
-        return None
+        else:
+            return 1e99
 
     """
     Running a tournament
+
+    Arguments
+    =========
+
+        .(list) exprs: List of expressions to be tested
+
+    Returns
+    =======
+
+        .(tuple) results: The score and the id of the best expression
     """
-    def tournament(self, group: list) -> int:
-        scores = []
+    def tournament(self, exprs: list) -> tuple:
 
-        for _id in group:
-            score = self.error(_id)
-            scores.append([_id, score])
+        results = []
 
-        # Sorting by increasing scores
-        scores.sort(key=lambda x: x[1])
+        for _expr in exprs:
+            err = self.error(_expr)
+            results.append([err, _expr])
 
-        for _expr in scores:
-            if uniform(0, 1) < self.Pfittest:
-                return _expr[0]
+        results.sort(key=lambda x: x[0])
+
+        for _res in results:
+            if uniform(0, 1) < self.Proba_fit:
+                return _res
+
+        return results[0]
+
+    """
+    Optimizing the constants
+
+    Arguments
+    =========
+
+        .(int) expr: The expression's id
+
+    Returns
+    =======
+
+        .(tuple) results: Returning the score and the optimized constants
+    """
+    def optimize(self, expr: int) -> tuple:
+
+        # Loading the expression's function
+        f = self.Population[expr]["tree"].lambdify(update=True)
+
+        # Loading the constants
+        constants_init = self.Population[expr]["constants"].values()
+
+        # Defining the equation to solve
+        def Equation(csts):
+            err = 0.0
+
+            for _obs in self.Objective:
+
+                # NOTE: _obs = [x0, x1, ..., xn]
+                # we consider [x0, x1, ..., xn-1] to be the variables
+                # and xn the observable such that
+                # xn = f(x0, x1, ..., xn-1)
+
+                try:
+                    err += abs(f(*[*_obs[:-1], *csts]) - _obs[-1])
+                except Exception:
+                    return 1e99
+
+            return err
+
+        # Lauching optimization through Nelder-Mead algorithm
+        # Enforcing the `adaptive` to `True` for multidimensional optimization
+        try:
+            sol = minimize(Equation, x0=list(constants_init), method="Nelder-Mead", options={"adaptive": True})
+        except Exception:
+            return 1e99, constants_init
+        
+        return sol.fun, sol.x
 
     """
     Mutating an expression
     """
-    def mutate(self, id: int) -> None:
-
-        tree = deepcopy(self.Population[id])
-
-        # Several choices
-        #   1) `mutate`:    mutating a random node
-        #   2) `apply`:     applying an operation on a node
-        #   3) `delete`:    deleting a branching from a given node
-        #   4) `append`:    generating and appending a new tree onto top node
-        #   5) `random`:    generating a new tree
-        #   6) `nothing`:   doing nothing
-
-        # TODO: exclude `ind` from acceptable operations
+    def mutate(self, expr: int) -> None:
         
+        # Actions
+        #   1) `switch`: mutate an operator
+        #   2) `prepend`: append / prepend a node
+        #   3) `apply`: apply an operation on a node
+        #   4) `delete`: replacing a branching by a constant or a variable
+        #   5) `new`: generate a new tree
+        #   6) `nothing`: no modification
         what_to_do = choice([
-            #"mutate", "apply", "delete", "append", "random", "nothing"
-            "mutate", "apply", "delete", "nothing"
+            "switch", "prepend", "apply", "delete", "new", "nothing"
         ])
-        
+
+        # New tree
+        tree = None
+
         match what_to_do:
-            # Mutating a random node
-            case "mutate":
-                # Selecting a node
-                _id = choice(list(tree.Nodes.keys()))
+            case "switch": tree = self.mutation_switch(expr)
+            case "prepend": tree = self.mutation_prepend(expr)
+            case "apply": tree = self.mutation_apply(expr)
+            case "delete": tree = self.mutation_delete(expr)
+            case "new": tree = self.mutation_new(expr)
+            case "nothing": pass
 
-                # Selecting a type
-                _t = choice(["op", "var", "cst"])
+        # Modifications were done on the tree
+        if tree is not None:
+            
+            # Computing score
+            old_score = self.error(expr)
+            new_score = self.error(tree)
 
-                # Default appendable type (not used for `var` and `cst`)
-                _at = "var"
+            # Computing complexity
+            old_complexity = len(self.Population[expr]["tree"].Nodes)
+            new_complexity = len(tree.Nodes)
 
-                # Default appendable row (not used for `var` and `cst`)
-                _ar = -1
+            # Computing complexity's occurrence
+            occurrences = {}
 
-                # Selecting a value
-                if _t == "op":
-                    _v = choice(list(Tree._Operations.keys()))
-                    _at = choice(["var", "cst"])
-
-                    if _at == "var":
-                        _ar = choice(tree.sVars)
-                    else:
-                        _ar = -1
-
-                elif _t == "var":
-                    _v = choice(tree.sVars)
-                else:
-                    # Retrieving the last constant introduced
-                    if len(tree.sConstants) == 0:
-                        _cst = 0
-                    else:
-                        _cst = int(tree.sConstants[-1][1:]) + 1
-
-                    _cst_id = choice(range(-1, len(tree.sConstants)))
-
-                    if _cst_id == -1:
-                        # Adding the constant
-                        tree.sConstants.append(f"c{_cst}")
-                        _v = _cst
-                    else:
-                        _v = int(tree.sConstants[_cst_id][1:])
+            for _expr in self.Population.values():
+                _s = len(_expr["tree"].Nodes)
                 
-                # Applying mutation
-                try:
-                    tree.mutate_node(node=_id, type=_t, value=_v, appending_type=_at, appending_row=_ar)
-                except Exception:
-                    return None
-            
-            # Applying a random operation on a node
-            case "apply":
-                # Selecting a node
-                _id = choice(list(tree.Nodes.keys()))
+                if _s not in occurrences:
+                    occurrences[_s] = 0
 
-                # Selecting an operation
-                _op = choice(list(Tree._Operations.keys()))
+                occurrences[_s] += 1
 
-                # Selecting an appendable type
-                _at = choice(["var", "cst"])
+            if old_complexity not in occurrences:
+                occurrences[old_complexity] = 0
 
-                # Selecting an appendable row
-                if _at == "var":
-                    _ar = randint(0, self.Dimension - 1)
-                else:
-                    _ar = -1
+            if new_complexity not in occurrences:
+                occurrences[new_complexity] = 0
 
-                # Applying the operation
-                tree.apply_on_node(node=_id, operation=_op, appending_type=_at, appending_row=_ar)
+            old_occ = occurrences[old_complexity]
+            new_occ = occurrences[new_complexity]
 
-            # Deleting a branching from a random node
-            case "delete":
-                # Selecting a node
-                _id = choice(list(tree.Nodes.keys()))
+            # Accepting or not the move
+            q_annealing = exp((old_score - new_score) / max(1e-15, self.Temperature))
+            q_occurrence = old_occ / max(1e-15, new_occ)
+            q_complexity = old_complexity / max(1e-15, new_complexity)
 
-                # Rejecting the move if the node is the highest
-                if _id == [_n for _n, _v in tree.Parents.items() if len(_v) == 0][0]:
-                    return None
+            # The higher, the better
+            q_a = old_complexity / old_score
+            q_b = new_complexity / new_score
 
-                # Deleting the branching, without deleting the parent node
-                tree.delete_branching_from(node=_id, include=False)
-            
-            # Generating a random tree (of complexity 3) and appending it on top (similar to `crossover`)
-            case "append":
-                pass
+            q_annealing = exp(-(q_a - q_b) / self.Temperature)
 
-            # Generating a random tree with a higher complexity
-            case "random":
-                pass
-            
-            # Speak for itself, doing nothing at all
-            case "nothing":
-                return None
+            # If we accept the move
+            if uniform(0, 1) < q_annealing:
+                
+                # Retrieving constants (with random values)
+                constants = {_k: uniform(-1, 1) for _k in tree.sConstants}
 
-        # Accepting the move or not?
-        # Creating temporary element
-        self.Population.append(deepcopy(tree))
+                # Saving it
+                self.Population[expr]["tree"] = deepcopy(tree)
+                self.Population[expr]["constants"] = deepcopy(constants)
+
+
+    def mutation_switch(self, expr: int) -> object:
+
+        # Selecting a random operation node
+        _id = choice([_k for _k, _v in self.Population[expr]["tree"].Nodes.items() if _v["type"] == "op"])
+        _op = self.Population[expr]["tree"].Nodes[_id]["value"]
+
+        # Selecting another operation with the same arity
+        _op_new = choice([_k for _k, _v in Tree._Operations.items() if _v["arity"] == Tree._Operations[_op]["arity"] and _k != _op])
+
+        # Creating a copy of the actual tree
+        tree = deepcopy(self.Population[expr]["tree"])
+
+        # Applying the modification
+        tree.Nodes[_id]["value"] = _op_new
+
+        return tree
+
+    def mutation_prepend(self, expr: int) -> object:
+
+        # Creating a copy of the actual tree
+        tree = deepcopy(self.Population[expr]["tree"])
+
+        # Generating a random expression (of complexity between 1 and 3)
+        _, _, branch = self.generate_tree(complexity=randint(1, 3))
         
-        if len(tree.sConstants) != 0:
-            self.Constants["tmp"] = {_c: uniform(-10, 10) for _c in tree.sConstants}
+        # We are prepending an expression at the top of the actual tree
+        if uniform(0, 1) < 0.5:
+            tree.prepend_tree(node=-1, tree=branch)
         
-        # Computing the score difference
+        # Otherwise, we replace a bottom node
+        else:
+            _id = choice([_node for _node, _v in tree.Children.items() if len(_v) == 0])
+            tree.prepend_tree(node=_id, tree=branch)
 
-        # NOTE: In some cases, Δs may be equals to NaN or Inf, which is rejected.
-        # Δs is defined as new_score - old_score.
-        # A better (lower) score leads to Δs < 1.
-        try:
-            Δs = self.error(-1) - self.error(id)
-        except Exception as e:
-            print(e)
+        return tree
 
-        # Computing the complexity difference
-        ΔL = len(tree.Nodes.keys()) - len(self.Population[id].Nodes)
+    def mutation_apply(self, expr: int) -> object:
 
-        if isfinite(Δs) is False:
-            # Deleting the temporary element
-            del self.Population[-1]
-            
+        # Creating a copy of the actual tree
+        tree = deepcopy(self.Population[expr]["tree"])
+
+        # Applying a random operation on the tree
+        self.random_operation(tree)
+
+        return tree
+
+    def mutation_delete(self, expr: int) -> object:
+
+        # Creating a copy of the actual tree
+        tree = deepcopy(self.Population[expr]["tree"])
+
+        # Selecting a random node (except the highest one)
+        _id = choice(list(tree.Nodes.keys()))
+
+        while len(tree.Parents[_id]) == 0:
+            _id = choice(list(tree.Nodes.keys()))
+
+        # Retrieving the branch parent
+        _parent = [_node for _node, _v in tree.Children.items() if _id in _v][0]
+
+        # Deleting the branching
+        tree.delete_branching_from(node=_id, include=True)
+
+        # Adding a node
+        _nt = choice(["var", "cst"])
+
+        if _nt == "var":
+            _nr = choice(tree.sVars)
+        else:
             if len(tree.sConstants) != 0:
-                del self.Constants["tmp"]
+                _nr = f"c{int(tree.sConstants[-1][1:]) + 1}"
+            else:
+                _nr = "c0"
 
-            return None
+        _node = tree.add_node(type=_nt, value=_nr)
+        tree.add_edge([_node, _parent])
 
-        alpha = exp(Δs / self.Temperature)
+        return tree
 
-        if isfinite(alpha) is False:
-            # Deleting the temporary element
-            del self.Population[-1]
-            
-            if len(tree.sConstants) != 0:
-                del self.Constants["tmp"]
+    def mutation_new(self, expr: int) -> object:
 
-            return None
+        complexity = choice(list(range(3, 5)))
 
-        # Accepting the move or not
-        if uniform(0, 1) < alpha:
-            if id in self.Constants and len(tree.sConstants) == 0:
-                del self.Constants[id]
-
-            self.Population[id] = deepcopy(tree)
-
-            if "tmp" in self.Constants:
-                self.Constants[id] = deepcopy(self.Constants["tmp"])
-
-        # Deleting the temporary element
-        del self.Population[-1]
+        _, _, tree = self.generate_tree(complexity)
         
-        if len(tree.sConstants) != 0:
-            del self.Constants["tmp"]
+        return tree
 
+    def crossover(self, _a: int, _b: int) -> None:
+
+        # Selecting random nodes for each element
+        _id_a = choice(list(self.Population[_a]["tree"].Nodes.keys()))
+        _id_b = choice(list(self.Population[_b]["tree"].Nodes.keys()))
+
+        # Creating copies
+        _tree_a = deepcopy(self.Population[_a]["tree"])
+        _tree_b = deepcopy(self.Population[_b]["tree"])
+
+        # Creating branches
+        _branch_a = _tree_a.branch_to_tree(_id_a)
+        _branch_b = _tree_b.branch_to_tree(_id_b)
+
+        # Updating ids in the case the selected node is the highest one
+        if _id_a == [_k for _k, _v in _tree_a.Parents.items() if len(_v) == 0][0]:
+            _id_a = -1
+
+        if _id_b == [_k for _k, _v in _tree_b.Parents.items() if len(_v) == 0][0]:
+            _id_b = -1
+
+        # Proceeding to replacements
+        _tree_a.prepend_tree(_id_a, _branch_b)
+        _tree_b.prepend_tree(_id_b, _branch_a)
+
+        # Accepting or not the move
+
+        # Computing scores
+        score_a = self.error(_a)
+        score_b = self.error(_b)
+        score_new_a = self.error(_tree_a)
+        score_new_b = self.error(_tree_b)
+
+        # Updating A
+        if score_a < score_new_a:
+            self.Population[_a]["tree"] = deepcopy(_tree_a)
+            self.Population[_a]["constants"] = {_k: uniform(-1, 1) for _k in _tree_a.sConstants}
+
+        # Updating B
+        if score_b < score_new_b:
+            self.Population[_b]["tree"] = deepcopy(_tree_b)
+            self.Population[_b]["constants"] = {_k: uniform(-1, 1) for _k in _tree_b.sConstants}
+
+    def migration(self):
+
+        # Selecting two islands
+        _isl_a = choice(list(self.Islands.keys()))
+        _isl_b = choice(list(self.Islands.keys()))
+
+        while _isl_a == _isl_b:
+            _isl_a = choice(list(self.Islands.keys()))
+            _isl_b = choice(list(self.Islands.keys()))
         
+        # Selecting an element in each island
+        _id_a = choice(self.Islands[_isl_a])
+        _id_b = choice(self.Islands[_isl_b])
 
-        return None
+        # Performing the exchange
+        _store = deepcopy(self.Population[_id_b])
+
+        self.Population[_id_b] = deepcopy(self.Population[_id_a])
+        self.Population[_id_a] = _store
+
 
     """
-    Performing a crossover
-    """
-    def crossover(self, A: int, B: int) -> None:
-        pass
-    
-    """
-    Running the Evolution - At each step, we proceed to several operations.
+    Running the evolution - At each step, we proceed to several operations.
 
-        1) Generating randomly homogeneous groups of the total population
-        2) Making "tournaments" in each group and keeping the "fittest"
-        3) Calculating the probability to "crossover"
-            Proba > Pcross: We are mutating the fittest of each group
-            Proba < Pcross: We are performing a crossover between two winners of tournaments
-        4) We are replacing the old formula by their mutated counterpart as long as it is accepted
-            
-            The move is accepted according to three parameters:
-                a) The complexity difference between the two structures;
-                b) The score difference
-                c) The "Temperature"
-        
-        "Temperature" should be understood in the context of Simulated Annealing (see https://en.wikipedia.org/wiki/Simulated_annealing):
-        We first (on the first iteration) apply a very temperature, allowing to explore various configuration, and decrease it slowly, at
-        each step. This allows to generally find an approximate solution to the global minimum (i.e. we are seeking).
+    Arguments
+    =========
 
-        /!\ Several parameters are impacting directly the "precision" and the "performance" of the algorithm, and there is no universal values
-        which allow both of them. For more information, please visit ...
+        .(float) tol: the error to reach before leaving the evolution process
+
+    Returns
+    =======
+
+        .None
     """
-    def run(self):
-        _n = 0
+    def run(self, tol: float = 1e-5) -> None:
 
         self.Temperature = 1.0
 
-        while _n < self.Niter:
+        for _iter in range(self.Niterations):
+            
+            # Iterating over islands
+            for _island_id, _island in self.Islands.items():
 
-            print(_n, self.Best_score)
+                # Shuffling the order of the island
+                _exprs = _island[:]
+                shuffle(_exprs)
 
-            if self.Best_tree is not None:
-                print(self.Best_tree.stringify())
+                groups = {}
 
-            self.Best = set()
+                # Creating groups for tournaments
+                for _n, _k in enumerate(_exprs):
+                    _id = int(_n / self.Ntournament)
 
-            # Generating groups of population
-            ids = [i for i in range(self.Npop)]
-            shuffle(ids)
+                    if _id not in groups:
+                        groups[_id] = []
 
-            groups = [ids[i:i + self.Ngroup] for i in range(0, len(ids), self.Ngroup)]
+                    groups[_id].append(_k)
 
-            # For each group, we are performing a tournament
-            # We are saving the fittest of each group into another list
-            for _g in groups:
-                _winner = self.tournament(_g)
-                self.Best.add(_winner)
+                #
+                # 1) Running a tournament per group
+                #
+                winners = []
 
-            # For each winner, we mutate it or perform a crossover with another winner
-            for _winner in self.Best:
+                for _k, _g in groups.items():
+                    best_score, best_expr = self.tournament(_g)
 
-                # End of the set
-                if _winner is None:
-                    break
+                    winners.append(best_expr)
 
-                if uniform(0, 1) > self.Pcross:
-                    self.mutate(_winner)
-                else:
-                    _cross = choice(list(self.Best))
-                    self.crossover(_winner, _cross)
+                    if _island_id not in self.Best_islands:
+                        self.Best_islands[_island_id] = {
+                            "score": best_score,
+                            "expr": best_expr
+                        }
 
-            # Slight optimization (for constants)
-            for _b in self.Best:
-                self.optimize(_b)
+                    if best_score < self.Best_islands[_island_id]["score"]:
+                        self.Best_islands[_island_id] = {
+                            "score": best_score,
+                            "expr": best_expr
+                        }
 
-            self.Temperature -= 1.0 / self.Niter
-            _n += 1
+                # Retrieving the island's best
+                best = self.Best_islands[_island_id]["expr"]
 
-x = linspace(0, 1)
-y = exp(-x**2) * x
+                # Optimizing constants for island's best expression
+                score, constants = self.optimize(best)
 
-objective = list(column_stack((x, y)))
-Evolution = Evolution(objective=objective, dimension=1)
-Evolution.run()
-print(Evolution.Best)
+                # Updating the score
+                self.Best_islands[_island_id]["score"] = score
+
+                # Saving the constants (if any)
+                for _k, _v in enumerate(constants):
+                    csts = list(self.Population[best]["constants"].keys())
+                    self.Population[best]["constants"][csts[_k]] = _v
+
+                #
+                # 2) Mutating groups winners
+                #
+                for _w in winners:
+                    self.mutate(_w)
+
+                #
+                # 3) Performing crossover in the island
+                #
+                if uniform(0, 1) < self.Proba_cross:
+                    
+                    # Selecting two random elements
+                    _a = choice(winners)
+                    _b = choice(winners)
+
+                    while _a == _b:
+                        _a = choice(winners)
+                        _b = choice(winners)
+
+                    # Performing a crossover
+                    self.crossover(_a, _b)
+
+            #
+            # 4) Performing crossover in the ocean
+            #
+            if uniform(0, 1) < self.Proba_cross:
+                    
+                # Selecting two random islands
+                _a = choice(list(self.Best_islands.keys()))
+                _b = choice(list(self.Best_islands.keys()))
+
+                while _a == _b:
+                    _a = choice(list(self.Best_islands.keys()))
+                    _b = choice(list(self.Best_islands.keys()))
+
+                # Performing a crossover
+                self.crossover(self.Best_islands[_a]["expr"], self.Best_islands[_b]["expr"])
+
+            #
+            # 5) Performing migrations
+            #
+            self.migration()
+
+            #
+            # 6) Optimizing constants
+            #
+            
+            for _n in self.Population.keys():
+                
+                _score, _constants = self.optimize(_n)
+
+                # Saving constants
+                _ks = list(self.Population[_n]["constants"].keys())
+
+                for _id, _ in enumerate(_ks):
+                    self.Population[_n]["constants"][_ks[_id]] = _constants[_id]
+
+            #
+            # 7) Retrieving the best
+            #
+            best = sorted(
+                list(self.Best_islands.values()),
+                key=lambda x: x["score"]
+            )[0]
+
+            best_expr = best["expr"]
+            best_score = best["score"]
+
+            print(self.Population[best_expr]["tree"].stringify(update=True))
+            print(best_score)
+
+            # Updating the temperature
+            self.Temperature -= 1.0 / self.Niterations
+
+            if self.Temperature < 0:
+                self.Temperature = 0
